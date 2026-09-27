@@ -1,0 +1,54 @@
+server:
+  port: 8080
+  servlet:
+    encoding:
+      charset: UTF-8
+      enabled: true
+      force: true
+
+spring:
+  application:
+    name: waste-oil-tracking
+  datasource:
+    url: jdbc:postgresql://localhost:5433/wasteoil
+    username: wasteoil
+    password: wasteoil123
+    hikari:
+      maximum-pool-size: 10
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+  kafka:
+    bootstrap-servers: localhost:9092
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      acks: all
+      retries: 3
+    consumer:
+      group-id: waste-oil-tracking
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      auto-offset-reset: earliest
+    listener:
+      ack-mode: batch
+
+wasteoil:
+  # 结算单价（元/公斤）
+  unit-price-per-kg: 3.20
+  # 运输损耗率阈值，超过则判定损耗异常
+  max-loss-rate: 0.03
+  # 称重设备离线判定（分钟）
+  device-offline-minutes: 5
+  # 司机迟到宽限（分钟）
+  driver-late-grace-minutes: 30
+  # 运输途中轨迹缺失判定（分钟）
+  track-missing-minutes: 10
+  # 风险分析窗口（天）
+  risk-window-days: 90
+  # 产量/预期比值低于该值进入风险名单
+  risk-yield-ratio: 0.3

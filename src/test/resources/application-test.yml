@@ -1,0 +1,9 @@
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5433/wasteoil_test
+    username: wasteoil
+    password: wasteoil123
+  kafka:
+    consumer:
+      group-id: waste-oil-test
+      auto-offset-reset: earliest

@@ -38,8 +38,15 @@ if ! (echo > /dev/tcp/localhost/9092) 2>/dev/null; then
   fi
   export KAFKA_HEAP_OPTS="-Xmx512M -Xms512M"
   UUID=$("$KAFKA_DIR/bin/kafka-storage.sh" random-uuid)
-  "$KAFKA_DIR/bin/kafka-storage.sh" format -t "$UUID" -c "$KAFKA_DIR/config/kraft/server.properties" >/dev/null 2>&1 || true
-  "$KAFKA_DIR/bin/kafka-server-start.sh" -daemon "$KAFKA_DIR/config/kraft/server.properties"
+  # 兼容 3.x（config/kraft/server.properties）与 4.x（config/server.properties，需 --standalone）
+  if [ -f "$KAFKA_DIR/config/kraft/server.properties" ]; then
+    KAFKA_CONF="$KAFKA_DIR/config/kraft/server.properties"
+    "$KAFKA_DIR/bin/kafka-storage.sh" format -t "$UUID" -c "$KAFKA_CONF" >/dev/null 2>&1 || true
+  else
+    KAFKA_CONF="$KAFKA_DIR/config/server.properties"
+    "$KAFKA_DIR/bin/kafka-storage.sh" format --standalone -t "$UUID" -c "$KAFKA_CONF" >/dev/null 2>&1 || true
+  fi
+  "$KAFKA_DIR/bin/kafka-server-start.sh" -daemon "$KAFKA_CONF"
   sleep 8
 fi
 echo "Kafka 就绪: localhost:9092"

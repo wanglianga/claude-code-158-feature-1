@@ -10,6 +10,8 @@ import com.wasteoil.config.WasteOilProperties;
 import com.wasteoil.dispatch.DispatchOrder;
 import com.wasteoil.dispatch.DispatchOrderRepository;
 import com.wasteoil.dispatch.DispatchStatus;
+import com.wasteoil.dispatch.Driver;
+import com.wasteoil.dispatch.DriverRepository;
 import com.wasteoil.exception.ExceptionService;
 import com.wasteoil.exception.ExceptionType;
 import com.wasteoil.kafka.EventPublisher;
@@ -36,6 +38,7 @@ public class WeighingService {
     private final WeighingDeviceRepository deviceRepository;
     private final BarrelRepository barrelRepository;
     private final DispatchOrderRepository dispatchRepository;
+    private final DriverRepository driverRepository;
     private final AppointmentRepository appointmentRepository;
     private final ManifestRepository manifestRepository;
     private final ExceptionService exceptionService;
@@ -46,6 +49,7 @@ public class WeighingService {
                            WeighingDeviceRepository deviceRepository,
                            BarrelRepository barrelRepository,
                            DispatchOrderRepository dispatchRepository,
+                           DriverRepository driverRepository,
                            AppointmentRepository appointmentRepository,
                            ManifestRepository manifestRepository,
                            ExceptionService exceptionService,
@@ -55,6 +59,7 @@ public class WeighingService {
         this.deviceRepository = deviceRepository;
         this.barrelRepository = barrelRepository;
         this.dispatchRepository = dispatchRepository;
+        this.driverRepository = driverRepository;
         this.appointmentRepository = appointmentRepository;
         this.manifestRepository = manifestRepository;
         this.exceptionService = exceptionService;
@@ -97,9 +102,24 @@ public class WeighingService {
         boolean manual = "MANUAL".equalsIgnoreCase(source);
         WeighingDevice device = null;
         boolean deviceOffline = false;
+        Driver driver = driverRepository.findById(dispatch.getDriverId())
+                .orElseThrow(() -> BizException.notFound("司机"));
+        Manifest manifestForGuard = manifestRepository.findByDispatchId(dispatchId)
+                .orElseThrow(() -> BizException.notFound("电子联单"));
+        if (manifestForGuard.getStatus() == com.wasteoil.manifest.ManifestStatus.PENDING_REVIEW) {
+            throw BizException.conflict("联单存在待复核离线补录，请复核完成后再继续称重");
+        }
         if (manual) {
             if (note == null || note.isBlank()) {
                 throw BizException.badRequest("手动补录必须填写原因");
+            }
+            if (Boolean.TRUE.equals(driver.getManualBlocked())) {
+                throw BizException.conflict("该司机补录频次异常，已被限制手动补录，请联系回收公司处理");
+            }
+            if (driver.getCreditScore() < properties.getCreditBlockThreshold()) {
+                throw BizException.conflict(String.format(
+                        "司机信用分 %d 低于阈值 %d，已被限制手动补录",
+                        driver.getCreditScore(), properties.getCreditBlockThreshold()));
             }
         } else {
             if (deviceCode == null || deviceCode.isBlank()) {
@@ -125,8 +145,7 @@ public class WeighingService {
         record.setNote(note);
         record.setWeighedAt(Instant.now());
 
-        Manifest manifest = manifestRepository.findByDispatchId(dispatchId)
-                .orElseThrow(() -> BizException.notFound("电子联单"));
+        Manifest manifest = manifestForGuard;
         record.setManifestId(manifest.getId());
         WeighingRecord saved = weighingRecordRepository.save(record);
 

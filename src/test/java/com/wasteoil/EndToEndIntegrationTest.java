@@ -87,10 +87,15 @@ class EndToEndIntegrationTest {
     }
 
     private long planDispatch(long appointmentId, String start, String end) throws Exception {
+        return planDispatch(appointmentId, 1, 1, start, end);
+    }
+
+    private long planDispatch(long appointmentId, long vehicleId, long driverId,
+                              String start, String end) throws Exception {
         JsonNode resp = postJson("/api/dispatches", "RECYCLER", "recycler-1", """
-                {"appointmentId": %d, "vehicleId": 1, "driverId": 1, "plantId": 1,
+                {"appointmentId": %d, "vehicleId": %d, "driverId": %d, "plantId": 1,
                  "plannedStart": "%s", "plannedEnd": "%s", "routeNote": "测试路线"}
-                """.formatted(appointmentId, start, end), 200);
+                """.formatted(appointmentId, vehicleId, driverId, start, end), 200);
         return resp.path("data").path("id").asLong();
     }
 
@@ -106,9 +111,15 @@ class EndToEndIntegrationTest {
 
     /** 司机执行到店核验 */
     private void arriveAndVerify(long dispatchId, String storeQr, String deviceCode) throws Exception {
-        postJson("/api/dispatches/" + dispatchId + "/depart", "DRIVER", "driver-1", "{}", 200);
-        postJson("/api/dispatches/" + dispatchId + "/arrive", "DRIVER", "driver-1", "{}", 200);
-        postJson("/api/dispatches/" + dispatchId + "/verify", "DRIVER", "driver-1", """
+        arriveAndVerify(dispatchId, storeQr, deviceCode, "driver-1");
+    }
+
+    /** 司机执行到店核验（指定司机账号） */
+    private void arriveAndVerify(long dispatchId, String storeQr, String deviceCode,
+                                 String driverAccount) throws Exception {
+        postJson("/api/dispatches/" + dispatchId + "/depart", "DRIVER", driverAccount, "{}", 200);
+        postJson("/api/dispatches/" + dispatchId + "/arrive", "DRIVER", driverAccount, "{}", 200);
+        postJson("/api/dispatches/" + dispatchId + "/verify", "DRIVER", driverAccount, """
                 {"storeQr": "%s", "deviceCode": "%s", "handoverName": "王店长",
                  "photoUrls": "https://img.example.com/p1.jpg"}
                 """.formatted(storeQr, deviceCode), 200);
@@ -437,5 +448,219 @@ class EndToEndIntegrationTest {
 
         JsonNode trend = getJson("/api/reports/regulator/trend", "REGULATOR", 200);
         assertThat(trend.path("data").size()).isGreaterThanOrEqualTo(1);
+    }
+
+    // ---------- 称重设备离线补录与人工复核 ----------
+
+    /** 创建门店预约并派单、到店核验（可指定门店与离线设备） */
+    private long[] prepareLoading(long storeId, long driverId, long vehicleId, String qr,
+                                  String deviceCode, int barrels, String estWeight) throws Exception {
+        long appointmentId = createAppointment(storeId, barrels, estWeight);
+        long dispatchId = planDispatch(appointmentId, vehicleId, driverId,
+                tomorrowAt(10, 0), tomorrowAt(11, 0));
+        arriveAndVerify(dispatchId, qr, deviceCode, driverId == 2 ? "driver-2" : "driver-1");
+        return new long[]{appointmentId, dispatchId};
+    }
+
+    private JsonNode supplement(long dispatchId, String deviceCode, String itemsJson,
+                                String photoUrls, String reason, String driver, int expected)
+            throws Exception {
+        String body = """
+                {"dispatchId": %d, "deviceCode": "%s", "items": %s, "photoUrls": "%s", "reason": "%s"}
+                """.formatted(dispatchId, deviceCode, itemsJson, photoUrls, reason);
+        return postJson("/api/supplements", "DRIVER", driver, body, expected);
+    }
+
+    @Test
+    @Order(40)
+    void 离线补录_待复核_复核通过打人工标记并正常结算() throws Exception {
+        long[] r = prepareLoading(1, 1, 1, "STORE-QR-1", "DEV-004", 2, "300");
+        long dispatchId = r[1];
+
+        JsonNode sup = supplement(dispatchId, "DEV-004",
+                """
+                [{"barrelCode":"BAR-005","weightKg":150,"handoverName":"王店长"},
+                 {"barrelCode":"BAR-006","weightKg":146,"handoverName":"王店长"}]
+                """,
+                "https://img.example.com/scale1.jpg,https://img.example.com/scale2.jpg",
+                "蓝牙秤无法连接，拍照手录", "driver-1", 200);
+        long supplementId = sup.path("data").path("id").asLong();
+        assertThat(sup.path("data").path("status").asText()).isEqualTo("PENDING_REVIEW");
+        assertThat(sup.path("data").path("declaredWeightKg").asDouble()).isEqualTo(296.0);
+
+        long manifestId = manifestIdOf(dispatchId);
+        JsonNode pending = getJson("/api/manifests/" + manifestId, "REGULATOR", 200);
+        JsonNode pm = pending.path("data").path("manifest");
+        assertThat(pm.path("status").asText()).isEqualTo("PENDING_REVIEW");
+        assertThat(pm.path("pendingReviewCount").asInt()).isEqualTo(1);
+        // 复核通过前重量不采信
+        assertThat(pm.path("exitWeightKg").asDouble()).isEqualTo(0.0);
+        assertThat(pm.path("barrelCountExit").asInt()).isEqualTo(0);
+        assertThat(pending.path("data").path("supplements").size()).isEqualTo(1);
+
+        // 待复核期间禁止起运
+        postJson("/api/dispatches/" + dispatchId + "/load-complete", "DRIVER", "driver-1", "{}", 409);
+
+        // 复核台视图：照片、历史重量、补录频次齐备
+        JsonNode view = getJson("/api/supplements/" + supplementId + "/review-view", "REGULATOR", 200);
+        assertThat(view.path("data").path("photoUrls").size()).isEqualTo(2);
+        assertThat(view.path("data").path("declaredAvgWeightPerBarrel").asDouble()).isEqualTo(148.0);
+        assertThat(view.path("data").path("barrelHistories").size()).isEqualTo(2);
+        assertThat(view.path("data").path("windowSupplementCount").asInt()).isGreaterThanOrEqualTo(1);
+        assertThat(view.path("data").path("driver").path("creditScore").asInt()).isEqualTo(100);
+
+        // 复核通过：照片清晰 + 桶数相符
+        postJson("/api/supplements/" + supplementId + "/review", "RECYCLER", "recycler-1", """
+                {"decision":"APPROVED","photoClear":true,"barrelCountMatch":true,
+                 "comment":"照片读数清晰，2 桶数量相符"}
+                """, 200);
+
+        JsonNode approved = getJson("/api/manifests/" + manifestId, "REGULATOR", 200).path("data");
+        JsonNode m = approved.path("manifest");
+        assertThat(m.path("status").asText()).isEqualTo("CREATED");
+        assertThat(m.path("pendingReviewCount").asInt()).isEqualTo(0);
+        assertThat(m.path("manualSupplementFlag").asBoolean()).isTrue();
+        assertThat(m.path("exitWeightKg").asDouble()).isEqualTo(296.0);
+        assertThat(m.path("barrelCountExit").asInt()).isEqualTo(2);
+        assertThat(m.path("manualWeighCount").asInt()).isGreaterThanOrEqualTo(1);
+        assertThat(approved.path("weighings").get(0).path("reviewStatus").asText()).isEqualTo("APPROVED");
+
+        // 复核通过后可正常起运、到厂、闭环结算
+        postJson("/api/dispatches/" + dispatchId + "/load-complete", "DRIVER", "driver-1", "{}", 200);
+        uploadTracksAndArrivePlant(dispatchId);
+        postJson("/api/receipts", "PLANT", "plant-1", """
+                {"manifestId": %d, "arrivalWeightKg": 294, "barrelCount": 2,
+                 "qualityCheck": "OK", "decision": "ACCEPT", "receivedBy": "厂验收员"}
+                """.formatted(manifestId), 200);
+        JsonNode closed = getJson("/api/manifests/" + manifestId, "REGULATOR", 200);
+        assertThat(closed.path("data").path("manifest").path("status").asText()).isEqualTo("CLOSED");
+        assertThat(closed.path("data").path("settlement").path("amount").asDouble()).isEqualTo(940.8);
+
+        // 监管抽查优先查看人工补录批次
+        JsonNode flagged = getJson("/api/manifests?manualSupplement=true", "REGULATOR", 200);
+        boolean contains = false;
+        for (JsonNode x : flagged.path("data")) {
+            if (x.path("id").asLong() == manifestId) {
+                contains = true;
+            }
+            assertThat(x.path("manualSupplementFlag").asBoolean()).isTrue();
+        }
+        assertThat(contains).isTrue();
+    }
+
+    @Test
+    @Order(41)
+    void 离线补录_在线设备拒绝且照片必填() throws Exception {
+        postJson("/api/weighings/devices/DEV-001/heartbeat", "RECYCLER", "recycler-1", "{}", 200);
+        long[] r = prepareLoading(1, 1, 1, "STORE-QR-1", "DEV-001", 1, "100");
+        long dispatchId = r[1];
+
+        // 设备在线 → 必须走直传，不能补录
+        supplement(dispatchId, "DEV-001",
+                "[{\"barrelCode\":\"BAR-004\",\"weightKg\":90}]",
+                "https://img.example.com/s.jpg", "蓝牙连不上", "driver-1", 409);
+
+        // 离线设备但无照片 → 拒绝
+        supplement(dispatchId, "DEV-004",
+                "[{\"barrelCode\":\"BAR-004\",\"weightKg\":90}]",
+                "", "蓝牙连不上", "driver-1", 400);
+
+        // 司机无权访问复核台
+        mvc.perform(get("/api/supplements/1/review-view")
+                        .header("X-Role", "DRIVER").header("X-Account-Id", "driver-1"))
+                .andExpect(status().isForbidden());
+    }
+
+    @Test
+    @Order(42)
+    void 频繁离线_设备检查工单并限制司机补录_核查解除后恢复() throws Exception {
+        // 第 1 次离线补录（driver-2 / DEV-006）
+        long[] a = prepareLoading(3, 2, 2, "STORE-QR-3", "DEV-006", 1, "100");
+        supplement(a[1], "DEV-006", "[{\"barrelCode\":\"BAR-203\",\"weightKg\":80}]",
+                "https://img.example.com/a.jpg", "设备无响应", "driver-2", 200);
+        JsonNode profile1 = getJson("/api/supplements/drivers/2", "RECYCLER", 200);
+        assertThat(profile1.path("data").path("manualBlocked").asBoolean()).isFalse();
+
+        // 第 2 次：达到测试阈值（2 次）→ 限制司机 + 设备检查工单
+        long[] b = prepareLoading(3, 2, 2, "STORE-QR-3", "DEV-006", 1, "100");
+        supplement(b[1], "DEV-006", "[{\"barrelCode\":\"BAR-204\",\"weightKg\":82}]",
+                "https://img.example.com/b.jpg", "设备无响应", "driver-2", 200);
+        JsonNode profile2 = getJson("/api/supplements/drivers/2", "RECYCLER", 200);
+        assertThat(profile2.path("data").path("manualBlocked").asBoolean()).isTrue();
+        assertThat(profile2.path("data").path("windowSupplementCount").asInt()).isGreaterThanOrEqualTo(2);
+
+        JsonNode deviceTickets = getJson("/api/exceptions/by-ref?refType=DEVICE&refId=6", "REGULATOR", 200);
+        boolean deviceCheck = false;
+        for (JsonNode t : deviceTickets.path("data")) {
+            if ("DEVICE_CHECK".equals(t.path("type").asText())) {
+                deviceCheck = true;
+            }
+        }
+        assertThat(deviceCheck).isTrue();
+
+        // 被限制后再次补录 → 拒绝
+        long[] c = prepareLoading(3, 2, 2, "STORE-QR-3", "DEV-006", 1, "100");
+        supplement(c[1], "DEV-006", "[{\"barrelCode\":\"BAR-205\",\"weightKg\":85}]",
+                "https://img.example.com/c.jpg", "设备无响应", "driver-2", 409);
+
+        // 回收公司核查设备后解除 → 频次重新起算，可继续补录
+        postJson("/api/supplements/drivers/2/unblock", "RECYCLER", "recycler-1",
+                "{\"comment\":\"已更换蓝牙模块并现场复测正常\"}", 200);
+        JsonNode profile3 = getJson("/api/supplements/drivers/2", "RECYCLER", 200);
+        assertThat(profile3.path("data").path("manualBlocked").asBoolean()).isFalse();
+        supplement(c[1], "DEV-006", "[{\"barrelCode\":\"BAR-205\",\"weightKg\":85}]",
+                "https://img.example.com/c.jpg", "设备无响应", "driver-2", 200);
+    }
+
+    @Test
+    @Order(43)
+    void 复核驳回_回滚重量_油桶退回_扣减信用并留痕() throws Exception {
+        long[] r = prepareLoading(1, 1, 1, "STORE-QR-1", "DEV-004", 1, "100");
+        long dispatchId = r[1];
+        JsonNode sup = supplement(dispatchId, "DEV-004",
+                "[{\"barrelCode\":\"BAR-004\",\"weightKg\":95,\"handoverName\":\"王店长\"}]",
+                "https://img.example.com/blur.jpg", "蓝牙秤离线", "driver-1", 200);
+        long supplementId = sup.path("data").path("id").asLong();
+        long manifestId = manifestIdOf(dispatchId);
+
+        // 驳回不填意见 → 拒绝；照片不清晰却通过 → 拒绝
+        postJson("/api/supplements/" + supplementId + "/review", "RECYCLER", "recycler-1",
+                "{\"decision\":\"REJECTED\",\"photoClear\":false,\"barrelCountMatch\":true}", 400);
+        postJson("/api/supplements/" + supplementId + "/review", "RECYCLER", "recycler-1",
+                "{\"decision\":\"APPROVED\",\"photoClear\":false,\"barrelCountMatch\":true}", 400);
+
+        // 正式驳回
+        postJson("/api/supplements/" + supplementId + "/review", "RECYCLER", "recycler-1", """
+                {"decision":"REJECTED","photoClear":false,"barrelCountMatch":false,
+                 "comment":"照片模糊无法辨认秤面读数，桶数与现场不符"}
+                """, 200);
+
+        JsonNode after = getJson("/api/manifests/" + manifestId, "REGULATOR", 200).path("data");
+        assertThat(after.path("manifest").path("status").asText()).isEqualTo("CREATED");
+        assertThat(after.path("manifest").path("manualSupplementFlag").asBoolean()).isFalse();
+        assertThat(after.path("manifest").path("exitWeightKg").asDouble()).isEqualTo(0.0);
+        assertThat(after.path("manifest").path("pendingReviewCount").asInt()).isEqualTo(0);
+        // 待复核称重明细已删除
+        assertThat(after.path("weighings").size()).isEqualTo(0);
+
+        // 油桶退回在店状态
+        JsonNode trace = getJson("/api/barrels/BAR-004/trace", "REGULATOR", 200);
+        assertThat(trace.path("data").path("barrel").path("status").asText()).isEqualTo("AT_STORE");
+
+        // 司机信用扣减（100 - 20 = 80）
+        JsonNode profile = getJson("/api/supplements/drivers/1", "RECYCLER", 200);
+        assertThat(profile.path("data").path("creditScore").asInt()).isEqualTo(80);
+        assertThat(profile.path("data").path("windowRejectedCount").asInt()).isGreaterThanOrEqualTo(1);
+
+        // 异常补录留痕
+        JsonNode tickets = getJson("/api/exceptions/by-ref?refType=MANIFEST&refId=" + manifestId,
+                "REGULATOR", 200);
+        boolean rejectedTicket = false;
+        for (JsonNode t : tickets.path("data")) {
+            if ("SUPPLEMENT_REJECTED".equals(t.path("type").asText())) {
+                rejectedTicket = true;
+            }
+        }
+        assertThat(rejectedTicket).isTrue();
     }
 }

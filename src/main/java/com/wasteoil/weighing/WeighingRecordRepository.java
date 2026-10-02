@@ -13,4 +13,6 @@ public interface WeighingRecordRepository extends JpaRepository<WeighingRecord, 
     List<WeighingRecord> findByBarrelIdOrderByWeighedAtDesc(Long barrelId);
 
     boolean existsByDispatchIdAndBarrelId(Long dispatchId, Long barrelId);
+
+    List<WeighingRecord> findBySupplementId(Long supplementId);
 }

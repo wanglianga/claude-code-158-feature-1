@@ -29,7 +29,12 @@ public class ManifestController {
 
     @GetMapping
     public ApiResult<List<Manifest>> list(@RequestParam(required = false) Long storeId,
-                                          @RequestParam(required = false) String status) {
+                                          @RequestParam(required = false) String status,
+                                          @RequestParam(required = false) Boolean manualSupplement) {
+        // 监管抽查优先：只看复核通过的人工补录批次
+        if (Boolean.TRUE.equals(manualSupplement)) {
+            return ApiResult.ok(manifestRepository.findByManualSupplementFlagTrueOrderByCreatedAtDesc());
+        }
         if (storeId != null) {
             return ApiResult.ok(manifestRepository.findByStoreIdOrderByCreatedAtDesc(storeId));
         }

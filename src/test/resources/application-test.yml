@@ -7,3 +7,8 @@ spring:
     consumer:
       group-id: waste-oil-test
       auto-offset-reset: earliest
+
+# 测试环境收紧离线补录阈值，便于确定性验证频繁离线管控
+wasteoil:
+  supplement-driver-limit: 2
+  supplement-device-check-threshold: 2

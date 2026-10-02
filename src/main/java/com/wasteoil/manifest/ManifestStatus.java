@@ -13,6 +13,8 @@ public enum ManifestStatus {
     CLOSED,
     /** 异常待处理 */
     EXCEPTION,
+    /** 离线补录待人工复核（复核通过前不得起运/收料/结算） */
+    PENDING_REVIEW,
     /** 处置厂拒收 */
     REJECTED,
     /** 商户质疑中 */

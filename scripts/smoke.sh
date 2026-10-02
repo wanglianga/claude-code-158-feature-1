@@ -147,7 +147,105 @@ check "商户回收证明联单数≥1" "$(python3 -c "import sys,json;print(jso
 TREND=$(req GET /api/reports/regulator/trend REGULATOR regulator-1)
 check "监管趋势报表" "$(python3 -c "import sys,json;print(len(json.load(sys.stdin)['data'])>0)" <<< "$TREND")" "True"
 
-echo "=== 9. Kafka 事件审计流水 ==="
+echo "=== 9. 称重设备离线补录 → 待复核 → 复核通过打人工标记 → 闭环结算 ==="
+# DEV-004 为从未心跳的离线蓝牙秤（门店1）
+AID6=$(jget "['data']['id']" <<< "$(req POST /api/appointments MERCHANT merchant-1 "{\"storeId\":1,\"barrelCount\":2,\"estimatedWeightKg\":300,\"windowStart\":\"$WS\",\"windowEnd\":\"$WE\"}")")
+DID6=$(jget "['data']['id']" <<< "$(req POST /api/dispatches RECYCLER recycler-1 "{\"appointmentId\":$AID6,\"vehicleId\":1,\"driverId\":1,\"plantId\":1,\"plannedStart\":\"$WS\",\"plannedEnd\":\"$WE\"}")")
+req POST /api/dispatches/$DID6/depart DRIVER driver-1 '{}' >/dev/null
+req POST /api/dispatches/$DID6/arrive DRIVER driver-1 '{}' >/dev/null
+req POST /api/dispatches/$DID6/verify DRIVER driver-1 '{"storeQr":"STORE-QR-1","deviceCode":"DEV-004","handoverName":"王店长"}' >/dev/null
+# 在线设备不能走离线补录
+ONLINE_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BASE/api/supplements" -H "X-Role: DRIVER" -H "Content-Type: application/json" -d "{\"dispatchId\":$DID6,\"deviceCode\":\"DEV-001\",\"items\":[{\"barrelCode\":\"BAR-005\",\"weightKg\":150}],\"photoUrls\":\"x.jpg\",\"reason\":\"r\"}")
+check "在线设备补录被拒(409)" "$ONLINE_CODE" "409"
+# 无照片被拒
+NOPHOTO_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BASE/api/supplements" -H "X-Role: DRIVER" -H "Content-Type: application/json" -d "{\"dispatchId\":$DID6,\"deviceCode\":\"DEV-004\",\"items\":[{\"barrelCode\":\"BAR-005\",\"weightKg\":150}],\"photoUrls\":\"\",\"reason\":\"蓝牙连不上\"}")
+check "补录无照片被拒(400)" "$NOPHOTO_CODE" "400"
+SUP=$(req POST /api/supplements DRIVER driver-1 "{\"dispatchId\":$DID6,\"deviceCode\":\"DEV-004\",\"items\":[{\"barrelCode\":\"BAR-005\",\"weightKg\":150,\"handoverName\":\"王店长\"},{\"barrelCode\":\"BAR-006\",\"weightKg\":146,\"handoverName\":\"王店长\"}],\"photoUrls\":\"https://img.example.com/s1.jpg,https://img.example.com/s2.jpg\",\"reason\":\"到店蓝牙秤无法连接，拍照手录\"}")
+SID=$(jget "['data']['id']" <<< "$SUP")
+check "补录单待复核" "$(jget "['data']['status']" <<< "$SUP")" "PENDING_REVIEW"
+check "补录申报总重 296kg" "$(jget "['data']['declaredWeightKg']" <<< "$SUP")" "296"
+MID6=$(curl -s "$BASE/api/manifests" -H "X-Role: REGULATOR" | python3 -c "
+import sys,json
+for m in json.load(sys.stdin)['data']:
+    if m['dispatchId']==$DID6: print(m['id']); break")
+D6=$(req GET /api/manifests/$MID6 REGULATOR regulator-1)
+check "联单进入待复核" "$(jget "['data']['manifest']['status']" <<< "$D6")" "PENDING_REVIEW"
+check "复核前重量不采信(0kg)" "$(jget "['data']['manifest']['exitWeightKg']" <<< "$D6")" "0.0"
+# 待复核禁止起运
+LC_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BASE/api/dispatches/$DID6/load-complete" -H "X-Role: DRIVER" -H "Content-Type: application/json" -d '{}')
+check "待复核禁止起运(409)" "$LC_CODE" "409"
+# 复核台视图含照片/历史重量/补录频次
+RV=$(req GET /api/supplements/$SID/review-view REGULATOR regulator-1)
+check "复核台照片 2 张" "$(jget "['data']['photoUrls'].__len__()" <<< "$RV")" "2"
+check "复核台申报桶均重 148kg" "$(jget "['data']['declaredAvgWeightPerBarrel']" <<< "$RV")" "148.0"
+check "复核台可见司机信用 100" "$(jget "['data']['driver']['creditScore']" <<< "$RV")" "100"
+# 照片不清晰却通过 → 拒绝
+BAD_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BASE/api/supplements/$SID/review" -H "X-Role: RECYCLER" -H "Content-Type: application/json" -d '{"decision":"APPROVED","photoClear":false,"barrelCountMatch":true}')
+check "照片不清晰通过被拒(400)" "$BAD_CODE" "400"
+req POST /api/supplements/$SID/review RECYCLER recycler-1 '{"decision":"APPROVED","photoClear":true,"barrelCountMatch":true,"comment":"秤面读数清晰，桶数相符"}' >/dev/null
+D6B=$(req GET /api/manifests/$MID6 REGULATOR regulator-1)
+check "复核通过联单恢复" "$(jget "['data']['manifest']['status']" <<< "$D6B")" "CREATED"
+check "人工补录标记已打" "$(jget "['data']['manifest']['manualSupplementFlag']" <<< "$D6B")" "True"
+check "复核后采信重量 296kg" "$(jget "['data']['manifest']['exitWeightKg']" <<< "$D6B")" "296.0"
+# 正常运输收料闭环结算
+req POST /api/dispatches/$DID6/load-complete DRIVER driver-1 '{}' >/dev/null
+req POST /api/tracks/$DID6 DRIVER driver-1 '{"points":[{"lat":30.66,"lng":104.06}]}' >/dev/null
+req POST /api/dispatches/$DID6/arrive-plant DRIVER driver-1 '{}' >/dev/null
+req POST /api/receipts PLANT plant-1 "{\"manifestId\":$MID6,\"arrivalWeightKg\":294,\"barrelCount\":2,\"qualityCheck\":\"OK\",\"decision\":\"ACCEPT\",\"receivedBy\":\"厂验收员\"}" >/dev/null
+D6C=$(req GET /api/manifests/$MID6 REGULATOR regulator-1)
+check "补录联单闭环 CLOSED" "$(jget "['data']['manifest']['status']" <<< "$D6C")" "CLOSED"
+check "补录联单结算 940.8 元" "$(jget "['data']['settlement']['amount']" <<< "$D6C")" "940.8"
+# 监管抽查优先查看人工补录批次
+PRIO=$(req GET "/api/manifests?manualSupplement=true" REGULATOR regulator-1)
+check "抽查优先列表含该联单" "$(python3 -c "import sys,json;print(any(m['id']==$MID6 for m in json.load(sys.stdin)['data']))" <<< "$PRIO")" "True"
+
+echo "=== 10. 离线补录复核驳回 → 回滚重量/油桶退回/扣信用/留痕 ==="
+AID7=$(jget "['data']['id']" <<< "$(req POST /api/appointments MERCHANT merchant-1 "{\"storeId\":1,\"barrelCount\":1,\"estimatedWeightKg\":100,\"windowStart\":\"$WS\",\"windowEnd\":\"$WE\"}")")
+DID7=$(jget "['data']['id']" <<< "$(req POST /api/dispatches RECYCLER recycler-1 "{\"appointmentId\":$AID7,\"vehicleId\":1,\"driverId\":1,\"plantId\":1,\"plannedStart\":\"$WS\",\"plannedEnd\":\"$WE\"}")")
+req POST /api/dispatches/$DID7/depart DRIVER driver-1 '{}' >/dev/null
+req POST /api/dispatches/$DID7/arrive DRIVER driver-1 '{}' >/dev/null
+req POST /api/dispatches/$DID7/verify DRIVER driver-1 '{"storeQr":"STORE-QR-1","deviceCode":"DEV-004","handoverName":"王店长"}' >/dev/null
+SUP2=$(req POST /api/supplements DRIVER driver-1 "{\"dispatchId\":$DID7,\"deviceCode\":\"DEV-004\",\"items\":[{\"barrelCode\":\"BAR-004\",\"weightKg\":95}],\"photoUrls\":\"https://img.example.com/blur.jpg\",\"reason\":\"蓝牙秤离线\"}")
+SID2=$(jget "['data']['id']" <<< "$SUP2")
+MID7=$(curl -s "$BASE/api/manifests" -H "X-Role: REGULATOR" | python3 -c "
+import sys,json
+for m in json.load(sys.stdin)['data']:
+    if m['dispatchId']==$DID7: print(m['id']); break")
+req POST /api/supplements/$SID2/review RECYCLER recycler-1 '{"decision":"REJECTED","photoClear":false,"barrelCountMatch":false,"comment":"照片模糊无法辨认读数，桶数不符"}' >/dev/null
+D7=$(req GET /api/manifests/$MID7 REGULATOR regulator-1)
+check "驳回后联单恢复 CREATED" "$(jget "['data']['manifest']['status']" <<< "$D7")" "CREATED"
+check "驳回后重量回滚 0kg" "$(jget "['data']['manifest']['exitWeightKg']" <<< "$D7")" "0.0"
+check "驳回后未打人工标记" "$(jget "['data']['manifest']['manualSupplementFlag']" <<< "$D7")" "False"
+check "油桶退回在店" "$(jget "['data']['barrel']['status']" <<< "$(req GET /api/barrels/BAR-004/trace REGULATOR regulator-1)")" "AT_STORE"
+check "司机信用扣减至 80" "$(jget "['data']['creditScore']" <<< "$(req GET /api/supplements/drivers/1 RECYCLER recycler-1)")" "80"
+check "驳回异常工单留痕" "$(req GET "/api/exceptions/by-ref?refType=MANIFEST&refId=$MID7" REGULATOR regulator-1 | python3 -c "import sys,json;print(any(t['type']=='SUPPLEMENT_REJECTED' for t in json.load(sys.stdin)['data']))")" "True"
+
+echo "=== 11. 频繁设备离线 → 设备检查工单 + 限制司机补录 → 核查解除 ==="
+submit_supp3() { # 派单并提交一次 DEV-006 离线补录，返回 dispatchId
+  local BAR=$1
+  local A=$(jget "['data']['id']" <<< "$(req POST /api/appointments MERCHANT merchant-1 "{\"storeId\":3,\"barrelCount\":1,\"estimatedWeightKg\":100,\"windowStart\":\"$WS\",\"windowEnd\":\"$WE\"}")")
+  local D=$(jget "['data']['id']" <<< "$(req POST /api/dispatches RECYCLER recycler-1 "{\"appointmentId\":$A,\"vehicleId\":2,\"driverId\":2,\"plantId\":1,\"plannedStart\":\"$WS\",\"plannedEnd\":\"$WE\"}")")
+  req POST /api/dispatches/$D/depart DRIVER driver-2 '{}' >/dev/null
+  req POST /api/dispatches/$D/arrive DRIVER driver-2 '{}' >/dev/null
+  req POST /api/dispatches/$D/verify DRIVER driver-2 '{"storeQr":"STORE-QR-3","deviceCode":"DEV-006","handoverName":"刘老板"}' >/dev/null
+  req POST /api/supplements DRIVER driver-2 "{\"dispatchId\":$D,\"deviceCode\":\"DEV-006\",\"items\":[{\"barrelCode\":\"$BAR\",\"weightKg\":80}],\"photoUrls\":\"https://img.example.com/$BAR.jpg\",\"reason\":\"设备无响应\"}" >/dev/null
+  echo "$D"
+}
+submit_supp3 BAR-203 >/dev/null
+submit_supp3 BAR-204 >/dev/null
+submit_supp3 BAR-205 >/dev/null
+check "3 次离线后司机被限录" "$(jget "['data']['manualBlocked']" <<< "$(req GET /api/supplements/drivers/2 RECYCLER recycler-1)")" "True"
+check "设备检查工单已生成" "$(req GET "/api/exceptions/by-ref?refType=DEVICE&refId=6" REGULATOR regulator-1 | python3 -c "import sys,json;print(any(t['type']=='DEVICE_CHECK' for t in json.load(sys.stdin)['data']))")" "True"
+DBLOCK=$(submit_supp3 BAR-206)
+BLOCK_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BASE/api/supplements" -H "X-Role: DRIVER" -H "Content-Type: application/json" -d "{\"dispatchId\":$DBLOCK,\"deviceCode\":\"DEV-006\",\"items\":[{\"barrelCode\":\"BAR-206\",\"weightKg\":80}],\"photoUrls\":\"https://img.example.com/x.jpg\",\"reason\":\"设备无响应\"}")
+# submit_supp3 内部已尝试一次（被限录），这里再次确认 409；直接用其返回码
+check "限录后补录被拒(409)" "$BLOCK_CODE" "409"
+req POST /api/supplements/drivers/2/unblock RECYCLER recycler-1 '{"comment":"已更换蓝牙模块并复测正常"}' >/dev/null
+check "核查设备后解除限录" "$(jget "['data']['manualBlocked']" <<< "$(req GET /api/supplements/drivers/2 RECYCLER recycler-1)")" "False"
+UNBLOCK_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BASE/api/supplements" -H "X-Role: DRIVER" -H "Content-Type: application/json" -d "{\"dispatchId\":$DBLOCK,\"deviceCode\":\"DEV-006\",\"items\":[{\"barrelCode\":\"BAR-206\",\"weightKg\":80}],\"photoUrls\":\"https://img.example.com/x.jpg\",\"reason\":\"设备无响应\"}")
+check "解除后恢复补录(200)" "$UNBLOCK_CODE" "200"
+
+echo "=== 12. Kafka 事件审计流水 ==="
 AUDIT=$(psql "postgresql://wasteoil:wasteoil123@localhost:5433/wasteoil" -tAc "SELECT count(*) FROM audit_logs" 2>/dev/null || echo "0")
 check "审计流水已落库(>20 条)" "$(python3 -c "print($AUDIT>20)")" "True"
 

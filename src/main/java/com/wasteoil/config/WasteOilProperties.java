@@ -33,4 +33,19 @@ public class WasteOilProperties {
 
     /** 产量/预期比值阈值 */
     private BigDecimal riskYieldRatio = new BigDecimal("0.3");
+
+    /** 离线补录频次统计窗口（天） */
+    private int supplementWindowDays = 30;
+
+    /** 窗口内同一司机离线补录达到该次数后限制继续手动补录 */
+    private int supplementDriverLimit = 3;
+
+    /** 窗口内同一台设备离线补录达到该次数后，要求回收公司检查设备 */
+    private int supplementDeviceCheckThreshold = 2;
+
+    /** 离线补录复核驳回扣减的司机信用分 */
+    private int supplementRejectCreditPenalty = 20;
+
+    /** 信用分低于该值时限制手动补录 */
+    private int creditBlockThreshold = 60;
 }

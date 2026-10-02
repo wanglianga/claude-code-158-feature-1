@@ -19,4 +19,7 @@ public interface ManifestRepository extends JpaRepository<Manifest, Long> {
     List<Manifest> findByStoreIdAndCreatedAtBetween(Long storeId, Instant from, Instant to);
 
     List<Manifest> findByCreatedAtBetween(Instant from, Instant to);
+
+    /** 人工补录标记联单（复核通过的离线补录批次），供监管抽查优先查看 */
+    List<Manifest> findByManualSupplementFlagTrueOrderByCreatedAtDesc();
 }

@@ -25,7 +25,11 @@ public enum ExceptionType {
     /** 运输损耗异常 */
     TRANSPORT_LOSS_ABNORMAL(true),
     /** 油桶数量不符 */
-    BARREL_COUNT_MISMATCH(true);
+    BARREL_COUNT_MISMATCH(true),
+    /** 离线补录复核驳回（异常补录，扣减司机信用） */
+    SUPPLEMENT_REJECTED(false),
+    /** 称重设备频繁离线，要求回收公司检查设备 */
+    DEVICE_CHECK(false);
 
     private final boolean blocking;
 

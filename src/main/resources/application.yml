@@ -52,3 +52,13 @@ wasteoil:
   risk-window-days: 90
   # 产量/预期比值低于该值进入风险名单
   risk-yield-ratio: 0.3
+  # 离线补录频次统计窗口（天）
+  supplement-window-days: 30
+  # 窗口内同一司机离线补录达到该次数后限制继续手动补录
+  supplement-driver-limit: 3
+  # 窗口内同一蓝牙秤离线补录达到该次数后，要求回收公司检查设备
+  supplement-device-check-threshold: 3
+  # 离线补录复核驳回扣减的司机信用分
+  supplement-reject-credit-penalty: 20
+  # 司机信用分低于该值时限制手动补录
+  credit-block-threshold: 60

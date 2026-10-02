@@ -45,6 +45,14 @@ public class WeighingRecord {
     @Column(name = "device_offline", nullable = false)
     private Boolean deviceOffline = false;
 
+    /** 复核状态：PENDING 待复核 / APPROVED 通过（设备直传默认）/ REJECTED 驳回 */
+    @Column(name = "review_status", nullable = false)
+    private String reviewStatus = "APPROVED";
+
+    /** 所属离线补录单（设备直传为空） */
+    @Column(name = "supplement_id")
+    private Long supplementId;
+
     /** 现场照片 */
     @Column(name = "photo_url")
     private String photoUrl;

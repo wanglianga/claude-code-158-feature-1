@@ -228,6 +228,12 @@ public class DispatchService {
         if (count == 0) {
             throw BizException.conflict("尚无称重记录，不能起运");
         }
+        Manifest pendingManifest = manifestService.getByDispatch(dispatchId);
+        if (pendingManifest.getStatus() == ManifestStatus.PENDING_REVIEW
+                || pendingManifest.getPendingReviewCount() > 0) {
+            throw BizException.conflict("存在待复核的离线补录（"
+                    + pendingManifest.getPendingReviewCount() + " 批），复核通过前不能起运");
+        }
         dispatch.setStatus(DispatchStatus.IN_TRANSIT);
         dispatch.setLoadDoneAt(Instant.now());
         dispatch.setUpdatedAt(Instant.now());

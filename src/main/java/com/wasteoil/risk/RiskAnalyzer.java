@@ -111,10 +111,10 @@ public class RiskAnalyzer {
                     60, windowStart, windowEnd));
         }
 
-        // 3. 手动补录占比过高：称重数据可信度低
+        // 3. 手动补录占比过高：称重数据可信度低（含设备离线人工补录）
         long manualCount = manifests.stream()
                 .flatMap(m -> weighingRecordRepository.findByManifestId(m.getId()).stream())
-                .filter(w -> "MANUAL".equals(w.getSource()))
+                .filter(w -> "MANUAL".equals(w.getSource()) || "OFFLINE_MANUAL".equals(w.getSource()))
                 .count();
         long totalWeigh = manifests.stream()
                 .mapToLong(m -> weighingRecordRepository.findByManifestId(m.getId()).size())

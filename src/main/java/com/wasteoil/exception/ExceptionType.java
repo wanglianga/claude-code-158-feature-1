@@ -14,6 +14,10 @@ public enum ExceptionType {
     DEVICE_OFFLINE(false),
     /** 司机手动补录 */
     MANUAL_ENTRY(false),
+    /** 离线补录复核驳回（阻断结算，需回收公司处置） */
+    OFFLINE_SUPPLEMENT_REJECTED(true),
+    /** 同一司机频繁设备离线（要求回收公司检查设备或限制补录） */
+    DRIVER_OFFLINE_FREQUENT(false),
     /** 运输轨迹缺失 */
     TRACK_MISSING(true),
     /** 处置厂拒收 */

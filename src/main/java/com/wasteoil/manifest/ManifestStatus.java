@@ -9,6 +9,8 @@ public enum ManifestStatus {
     RECEIVED,
     /** 合规比对通过 */
     VERIFIED,
+    /** 离线补录待复核（复核通过前不允许进入结算） */
+    PENDING_REVIEW,
     /** 已结算闭环 */
     CLOSED,
     /** 异常待处理 */

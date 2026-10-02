@@ -37,7 +37,7 @@ public class WeighingRecord {
     @Column(name = "weight_kg", nullable = false)
     private BigDecimal weightKg;
 
-    /** DEVICE / MANUAL */
+    /** DEVICE / MANUAL / OFFLINE_MANUAL（设备离线人工补录） */
     @Column(nullable = false)
     private String source;
 
@@ -48,6 +48,10 @@ public class WeighingRecord {
     /** 现场照片 */
     @Column(name = "photo_url")
     private String photoUrl;
+
+    /** 秤面照片（离线补录必传，复核时核对清晰度与读数） */
+    @Column(name = "scale_photo_url")
+    private String scalePhotoUrl;
 
     /** 交接人 */
     @Column(name = "handover_name")

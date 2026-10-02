@@ -82,4 +82,20 @@ public class InspectionService {
     public List<Inspection> listByManifest(Long manifestId) {
         return inspectionRepository.findByManifestId(manifestId);
     }
+
+    /**
+     * 优先抽查目标：带人工补录标记的联单（离线补录复核通过后打标），
+     * 尚未抽查过的排在前面，供监管抽查时优先查看。
+     */
+    @Transactional(readOnly = true)
+    public List<PriorityTarget> priorityTargets() {
+        return manifestRepository.findByManualSupplementFlagTrueOrderByCreatedAtDesc().stream()
+                .map(m -> new PriorityTarget(m, !inspectionRepository.findByManifestId(m.getId()).isEmpty()))
+                .sorted(java.util.Comparator.comparing(PriorityTarget::inspected))
+                .toList();
+    }
+
+    /** 优先抽查目标：联单 + 是否已被抽查过 */
+    public record PriorityTarget(Manifest manifest, boolean inspected) {
+    }
 }

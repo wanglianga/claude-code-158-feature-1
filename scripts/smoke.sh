@@ -135,7 +135,82 @@ for t in json.load(sys.stdin)['data']:
 req POST /api/exceptions/$TID/resolve RECYCLER recycler-1 '{"resolution":"确认为阀门渗漏，已维修备案"}' >/dev/null
 check "工单处理后备联单 CLOSED" "$(jget "['data']['manifest']['status']" <<< "$(req GET /api/manifests/$MID5 REGULATOR regulator-1)")" "CLOSED"
 
-echo "=== 8. 监管抽查 + 风险名单 + 报表 ==="
+echo "=== 8. 称重设备离线补录：拍照补录 → 待复核 → 复核通过打标放行结算 ==="
+AID6=$(jget "['data']['id']" <<< "$(req POST /api/appointments MERCHANT merchant-2 "{\"storeId\":3,\"barrelCount\":2,\"estimatedWeightKg\":240,\"windowStart\":\"$WS\",\"windowEnd\":\"$WE\"}")")
+DID6=$(jget "['data']['id']" <<< "$(req POST /api/dispatches RECYCLER recycler-1 "{\"appointmentId\":$AID6,\"vehicleId\":2,\"driverId\":2,\"plantId\":1,\"plannedStart\":\"$WS\",\"plannedEnd\":\"$WE\"}")")
+req POST /api/dispatches/$DID6/depart DRIVER driver-2 '{}' >/dev/null
+req POST /api/dispatches/$DID6/arrive DRIVER driver-2 '{}' >/dev/null
+req POST /api/dispatches/$DID6/verify DRIVER driver-2 '{"storeQr":"STORE-QR-3","deviceCode":"DEV-003","handoverName":"刘老板"}' >/dev/null
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BASE/api/weighings" -H "X-Role: DRIVER" -H "Content-Type: application/json" -d "{\"dispatchId\":$DID6,\"barrelCode\":\"BAR-201\",\"weightKg\":120,\"source\":\"OFFLINE_MANUAL\",\"note\":\"蓝牙秤无法连接\"}")
+check "离线补录无秤面照片被拒(400)" "$CODE" "400"
+req POST /api/weighings DRIVER driver-2 "{\"dispatchId\":$DID6,\"barrelCode\":\"BAR-201\",\"weightKg\":120,\"source\":\"OFFLINE_MANUAL\",\"scalePhotoUrl\":\"https://img.example.com/scale1.jpg\",\"note\":\"蓝牙秤无法连接，拍摄秤面人工读数\"}" >/dev/null
+req POST /api/weighings DRIVER driver-2 "{\"dispatchId\":$DID6,\"barrelCode\":\"BAR-202\",\"weightKg\":118,\"source\":\"OFFLINE_MANUAL\",\"scalePhotoUrl\":\"https://img.example.com/scale2.jpg\",\"note\":\"蓝牙秤无法连接，拍摄秤面人工读数\"}" >/dev/null
+MID6=$(curl -s "$BASE/api/manifests" -H "X-Role: REGULATOR" | python3 -c "
+import sys,json
+for m in json.load(sys.stdin)['data']:
+    if m['dispatchId']==$DID6: print(m['id']); break")
+check "联单进入待复核" "$(jget "['data']['manifest']['supplementReviewStatus']" <<< "$(req GET /api/manifests/$MID6 REGULATOR regulator-1)")" "PENDING"
+check "联单记录离线补录 2 条" "$(jget "['data']['manifest']['offlineWeighCount']" <<< "$(req GET /api/manifests/$MID6 REGULATOR regulator-1)")" "2"
+req POST /api/dispatches/$DID6/load-complete DRIVER driver-2 '{}' >/dev/null
+req POST /api/tracks/$DID6 DRIVER driver-2 '{"points":[{"lat":30.62,"lng":104.03}]}' >/dev/null
+req POST /api/dispatches/$DID6/arrive-plant DRIVER driver-2 '{}' >/dev/null
+req POST /api/receipts PLANT plant-1 "{\"manifestId\":$MID6,\"arrivalWeightKg\":236,\"barrelCount\":2,\"qualityCheck\":\"OK\",\"decision\":\"ACCEPT\",\"receivedBy\":\"厂验收员\"}" >/dev/null
+MD6=$(req GET /api/manifests/$MID6 REGULATOR regulator-1)
+check "复核前联单待复核不结算" "$(jget "['data']['manifest']['status']" <<< "$MD6")" "PENDING_REVIEW"
+check "复核前无结算单" "$(python3 -c "import sys,json;print(json.load(sys.stdin)['data']['settlement'] is None)" <<< "$MD6")" "True"
+RID6=$(req GET "/api/supplement-reviews?status=PENDING" RECYCLER recycler-1 | python3 -c "
+import sys,json
+for r in json.load(sys.stdin)['data']:
+    if r['manifestId']==$MID6: print(r['id']); break")
+RD6=$(req GET /api/supplement-reviews/$RID6 RECYCLER recycler-1)
+check "复核台可见秤面照片" "$(python3 -c "import sys,json;d=json.load(sys.stdin)['data'];print(len(d['supplements'])==2 and all(s['scalePhotoUrl'] for s in d['supplements']))" <<< "$RD6")" "True"
+check "复核台可见桶数与历史重量" "$(python3 -c "import sys,json;d=json.load(sys.stdin)['data'];print(d['barrelCountExit']==2 and len(d['histories'])==2)" <<< "$RD6")" "True"
+check "复核台可见司机补录频次" "$(python3 -c "import sys,json;d=json.load(sys.stdin)['data'];print(d['driver']['offlineSupplementsInWindow']>=2)" <<< "$RD6")" "True"
+req POST /api/supplement-reviews/$RID6/approve RECYCLER recycler-1 '{"photoClarity":"CLEAR","note":"秤面照片清晰，读数与历史重量一致"}' >/dev/null
+MD6=$(req GET /api/manifests/$MID6 REGULATOR regulator-1)
+check "复核通过后联单 CLOSED" "$(jget "['data']['manifest']['status']" <<< "$MD6")" "CLOSED"
+check "联单打上人工补录标记" "$(jget "['data']['manifest']['manualSupplementFlag']" <<< "$MD6")" "True"
+check "复核后生成结算 755.2 元" "$(jget "['data']['settlement']['amount']" <<< "$MD6")" "755.2"
+check "人工补录联单进入监管优先抽查" "$(req GET /api/inspections/priority-targets REGULATOR regulator-1 | python3 -c "import sys,json;print(any(t['manifest']['id']==$MID6 for t in json.load(sys.stdin)['data']))")" "True"
+
+echo "=== 9. 复核驳回扣信用 + 频繁离线限制补录 ==="
+AID7=$(jget "['data']['id']" <<< "$(req POST /api/appointments MERCHANT merchant-2 "{\"storeId\":3,\"barrelCount\":1,\"estimatedWeightKg\":120,\"windowStart\":\"$WS\",\"windowEnd\":\"$WE\"}")")
+DID7=$(jget "['data']['id']" <<< "$(req POST /api/dispatches RECYCLER recycler-1 "{\"appointmentId\":$AID7,\"vehicleId\":2,\"driverId\":2,\"plantId\":1,\"plannedStart\":\"$WS\",\"plannedEnd\":\"$WE\"}")")
+req POST /api/dispatches/$DID7/depart DRIVER driver-2 '{}' >/dev/null
+req POST /api/dispatches/$DID7/arrive DRIVER driver-2 '{}' >/dev/null
+req POST /api/dispatches/$DID7/verify DRIVER driver-2 '{"storeQr":"STORE-QR-3","deviceCode":"DEV-003","handoverName":"刘老板"}' >/dev/null
+req POST /api/weighings DRIVER driver-2 "{\"dispatchId\":$DID7,\"barrelCode\":\"BAR-203\",\"weightKg\":110,\"source\":\"OFFLINE_MANUAL\",\"scalePhotoUrl\":\"https://img.example.com/scale3.jpg\",\"note\":\"蓝牙秤无法连接\"}" >/dev/null
+MID7=$(curl -s "$BASE/api/manifests" -H "X-Role: REGULATOR" | python3 -c "
+import sys,json
+for m in json.load(sys.stdin)['data']:
+    if m['dispatchId']==$DID7: print(m['id']); break")
+check "第 3 次离线补录触发频繁离线工单" "$(req GET "/api/exceptions/by-ref?refType=DRIVER&refId=2" RECYCLER recycler-1 | python3 -c "import sys,json;print(any(t['type']=='DRIVER_OFFLINE_FREQUENT' for t in json.load(sys.stdin)['data']))")" "True"
+req POST /api/drivers/2/restrict RECYCLER recycler-1 '{"reason":"频繁设备离线，暂停手动补录，待检查称重设备"}' >/dev/null
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BASE/api/weighings" -H "X-Role: DRIVER" -H "Content-Type: application/json" -d "{\"dispatchId\":$DID7,\"barrelCode\":\"BAR-204\",\"weightKg\":100,\"source\":\"OFFLINE_MANUAL\",\"scalePhotoUrl\":\"https://img.example.com/scale4.jpg\",\"note\":\"蓝牙秤无法连接\"}")
+check "被限制司机补录被拒(409)" "$CODE" "409"
+req POST /api/drivers/2/unrestrict RECYCLER recycler-1 >/dev/null
+check "检查设备后解除限制" "$(req GET /api/drivers RECYCLER recycler-1 | python3 -c "import sys,json;print([d['driver']['manualRestricted'] for d in json.load(sys.stdin)['data'] if d['driver']['id']==2][0])")" "False"
+req POST /api/dispatches/$DID7/load-complete DRIVER driver-2 '{}' >/dev/null
+req POST /api/tracks/$DID7 DRIVER driver-2 '{"points":[{"lat":30.62,"lng":104.03}]}' >/dev/null
+req POST /api/dispatches/$DID7/arrive-plant DRIVER driver-2 '{}' >/dev/null
+req POST /api/receipts PLANT plant-1 "{\"manifestId\":$MID7,\"arrivalWeightKg\":110,\"barrelCount\":1,\"qualityCheck\":\"OK\",\"decision\":\"ACCEPT\",\"receivedBy\":\"厂验收员\"}" >/dev/null
+RID7=$(req GET "/api/supplement-reviews?status=PENDING" RECYCLER recycler-1 | python3 -c "
+import sys,json
+for r in json.load(sys.stdin)['data']:
+    if r['manifestId']==$MID7: print(r['id']); break")
+req POST /api/supplement-reviews/$RID7/reject RECYCLER recycler-1 '{"photoClarity":"BLURRY","note":"秤面照片模糊，读数无法辨认，疑似虚报"}' >/dev/null
+MD7=$(req GET /api/manifests/$MID7 REGULATOR regulator-1)
+check "驳回后联单转异常" "$(jget "['data']['manifest']['status']" <<< "$MD7")" "EXCEPTION"
+check "驳回后复核状态 REJECTED" "$(jget "['data']['manifest']['supplementReviewStatus']" <<< "$MD7")" "REJECTED"
+check "异常补录扣司机信用(90)" "$(req GET /api/drivers RECYCLER recycler-1 | python3 -c "import sys,json;print([d['driver']['creditScore'] for d in json.load(sys.stdin)['data'] if d['driver']['id']==2][0])")" "90"
+TID7=$(req GET "/api/exceptions/by-ref?refType=MANIFEST&refId=$MID7" RECYCLER recycler-1 | python3 -c "
+import sys,json
+for t in json.load(sys.stdin)['data']:
+    if t['type']=='OFFLINE_SUPPLEMENT_REJECTED': print(t['id']); break")
+req POST /api/exceptions/$TID7/resolve RECYCLER recycler-1 '{"resolution":"已联系门店现场复磅，确认重量无误"}' >/dev/null
+check "工单处置后联单 CLOSED" "$(jget "['data']['manifest']['status']" <<< "$(req GET /api/manifests/$MID7 REGULATOR regulator-1)")" "CLOSED"
+
+echo "=== 10. 监管抽查 + 风险名单 + 报表 ==="
 req POST /api/inspections REGULATOR regulator-1 "{\"manifestId\":$MID,\"result\":\"PASS\",\"note\":\"抽查合格\"}" >/dev/null
 req POST /api/risks/scan REGULATOR regulator-1 '{}' >/dev/null
 RISKS=$(req GET /api/risks REGULATOR regulator-1)
@@ -147,7 +222,7 @@ check "商户回收证明联单数≥1" "$(python3 -c "import sys,json;print(jso
 TREND=$(req GET /api/reports/regulator/trend REGULATOR regulator-1)
 check "监管趋势报表" "$(python3 -c "import sys,json;print(len(json.load(sys.stdin)['data'])>0)" <<< "$TREND")" "True"
 
-echo "=== 9. Kafka 事件审计流水 ==="
+echo "=== 11. Kafka 事件审计流水 ==="
 AUDIT=$(psql "postgresql://wasteoil:wasteoil123@localhost:5433/wasteoil" -tAc "SELECT count(*) FROM audit_logs" 2>/dev/null || echo "0")
 check "审计流水已落库(>20 条)" "$(python3 -c "print($AUDIT>20)")" "True"
 

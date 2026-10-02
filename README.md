@@ -5,6 +5,12 @@
 并处理取消、迟到、混入厨余、设备离线、手动补录、轨迹缺失、拒收、重量质疑、监管抽查等异常，
 对长期产量/营业规模/回收频次不匹配的门店自动生成风险名单。
 
+**称重设备离线补录**：司机到店蓝牙秤无法连接时，允许拍摄秤面照片并手动录入重量，
+该批联单随即进入待复核；复核人员核对照片清晰度、油桶数量、历史重量与司机补录频次后，
+确认才允许进入结算——复核通过的联单打上人工补录标记供监管抽查优先查看，
+异常补录（驳回）扣减司机信用并阻断闭环；同一司机频繁设备离线时，
+系统登记工单要求回收公司检查设备，回收公司也可直接限制该司机继续手动补录。
+
 ## 技术栈
 
 Java 17 · Spring Boot 3.3 · Spring Data JPA · Spring Kafka · PostgreSQL 15 · Kafka 3.8（KRaft）· Flyway · Maven
@@ -36,36 +42,46 @@ mvn spring-boot:run           # 应用(8080)，Flyway 自动建表并写入演�
 
 > 数据库连接等配置见 `src/main/resources/application.yml`（默认 `localhost:5433/wasteoil`，账号 `wasteoil/wasteoil123`）。
 
+## API 文档（Swagger UI）
+
+应用启动后访问 **http://localhost:8080/swagger-ui.html**（OpenAPI JSON：`/v3/api-docs`），
+可在线查看全部 45 个接口并直接调试（调用时在请求头携带 `X-Role` / `X-Account-Id`，见下方测试账号）。
+
 ## 测试账号（轻量鉴权：请求头 `X-Role` + `X-Account-Id`）
 
 | 角色 | X-Role | X-Account-Id | 说明 |
 |---|---|---|---|
 | 商户 | `MERCHANT` | `merchant-1`（川香餐饮集团）/ `merchant-2`（老城美食广场） | 提交预约、取消、质疑重量、查回收证明与结算 |
 | 回收公司 | `RECYCLER` | `recycler-1` | 派单、处理异常工单、查车辆效率 |
-| 司机 | `DRIVER` | `driver-1`（张师傅）/ `driver-2`（李师傅） | 出发/到店/扫码核验/称重/轨迹/到厂 |
+| 司机 | `DRIVER` | `driver-1`（张师傅）/ `driver-2`（李师傅）/ `driver-3`（王师傅） | 出发/到店/扫码核验/称重/轨迹/到厂 |
 | 处置厂 | `PLANT` | `plant-1`（绿源废油处置厂） | 二次称重收料、接收/拒收 |
 | 监管 | `REGULATOR` | `regulator-1` | 联单追溯、抽查、风险名单、趋势报表 |
 
-演示基础数据（Flyway `V2__seed.sql`）：门店 3 家（含商圈与营业规模）、油桶 8 只（`BAR-001`~`BAR-202`）、
-车辆 2 台、司机 2 名、处置厂 1 家（接收时间 08:00-18:00）、称重设备 3 台（`DEV-001`~`DEV-003`）、
-春熙路商圈早晚高峰限行规则。
+演示基础数据（Flyway `V2__seed.sql` + `V3__offline_supplement_review.sql`）：门店 3 家（含商圈与营业规模）、
+油桶 11 只（`BAR-001`~`BAR-205`）、车辆 2 台、司机 3 名、处置厂 1 家（接收时间 08:00-18:00）、
+称重设备 3 台（`DEV-001`~`DEV-003`）、春熙路商圈早晚高峰限行规则。
 
 ## 验证方式
 
-### 1. 自动化测试（27 个用例）
+### 1. 自动化测试（31 个用例）
 
 ```bash
 mvn test
 ```
 
 > 集成测试需要本地 PostgreSQL（5433 端口，首次执行 `bash scripts/start-local.sh` 会自动创建 `wasteoil_test` 库）；Kafka 由测试内嵌启动，无需外部依赖。
+> 测试会在库内真实写入业务数据，重复执行前请重建测试库：
+> `psql -h localhost -p 5433 -U wasteoil -d postgres -c "DROP DATABASE wasteoil_test" -c "CREATE DATABASE wasteoil_test"`
 
 - 单元测试：派单规划（容量/限行/接收时间窗）、合规闭环比对（损耗/桶数/轨迹/质检）、风险分析（15 个）
 - 集成测试 `EndToEndIntegrationTest`：真实 PostgreSQL 测试库 + 内嵌 Kafka + MockMvc，
   覆盖全链路闭环、一桶一码追溯、重量质疑、监管抽查、商户取消、手动补录、拒收、
   损耗异常阻断与恢复、派单校验、角色鉴权、风险扫描、三类报表（12 个）
+- 集成测试 `OfflineSupplementIntegrationTest`：称重设备离线补录全链路——
+  秤面照片/原因必填校验、联单待复核、复核工作台（照片/桶数/历史重量/司机频次与信用）、
+  复核通过打人工补录标记并放行结算、复核驳回扣信用阻断闭环、频繁离线工单与限制/解除补录、角色鉴权（4 个）
 
-### 2. 端到端冒烟脚本（27 项断言，需应用已启动）
+### 2. 端到端冒烟脚本（46 项断言，需应用已启动）
 
 ```bash
 bash scripts/smoke.sh
@@ -74,13 +90,22 @@ bash scripts/smoke.sh
 按真实调用顺序走通：主流程闭环（联单 CLOSED、损耗 2kg、结算 947.2 元）→ 油桶追溯 →
 商户质疑（结算冻结→按 297kg 调整为 950.4 元）→ 临时取消（派单/联单联动取消）→
 手动补录（无原因 400，有原因留痕）→ 拒收（联单 REJECTED）→ 损耗 20% 阻断闭环（工单处理后恢复 CLOSED）→
+**离线补录**（无秤面照片 400 → 拍照补录 2 桶 → 联单待复核 → 收料后 PENDING_REVIEW 不结算 →
+复核台核对照片/桶数/历史重量/司机频次 → 通过打标 CLOSED 结算 755.2 元 → 进入监管优先抽查）→
+**复核驳回与频繁离线**（第 3 次离线补录触发频繁离线工单 → 限制补录 409 → 解除 →
+驳回扣信用至 90 → 联单 EXCEPTION → 工单处置后 CLOSED）→
 抽查/风险名单/车辆效率/回收证明/监管趋势 → Kafka 事件审计流水落库校验。
 
 ### 实际验证结论（本次交付前执行）
 
-- `mvn test`：**27/27 通过**（单元 15 + 集成 12，集成测试使用 EmbeddedKafka + PostgreSQL 测试库）
-- `bash scripts/smoke.sh`：**27/27 通过**（真实 Kafka 3.8 KRaft + PostgreSQL 15 + 应用实跑）
+- `mvn test`：**31/31 通过**（单元 15 + 集成 16，集成测试使用 EmbeddedKafka + PostgreSQL 测试库，
+  其中 `OfflineSupplementIntegrationTest` 4 个用例覆盖离线补录全链路）
+- `bash scripts/smoke.sh`：**46/46 通过**（真实 Kafka 3.8 KRaft + PostgreSQL 15 + 应用实跑，
+  含离线补录复核通过/驳回/频繁离线限制 19 项新断言）
 - 冒烟期间应用日志 0 条 ERROR；7 个 Kafka 主题全部创建；`audit_logs` 审计流水随事件持续增长
+  （含 `OfflineSupplementRecorded` / `SupplementReviewApproved` / `SupplementReviewRejected` /
+  `DriverManualRestricted` 等新事件落库）
+- Swagger UI（`/swagger-ui.html`）与 OpenAPI JSON（`/v3/api-docs`）实际访问 200，45 个接口全部在册
 
 ## 主要 API
 
@@ -91,8 +116,13 @@ bash scripts/smoke.sh
 | POST | `/api/dispatches` | 回收公司 | 生成派单（校验车辆容量、商圈限行、处置厂接收时间窗，同时创建电子联单） |
 | POST | `/api/dispatches/{id}/depart` `/arrive` | 司机 | 出发 / 到店（超时自动登记司机迟到） |
 | POST | `/api/dispatches/{id}/verify` | 司机 | 扫码核验门店二维码、称重设备、交接人、现场照片 |
-| POST | `/api/weighings` | 司机 | 称重（`DEVICE` 直传 / `MANUAL` 手动补录须填原因；离线设备数据打标） |
+| POST | `/api/weighings` | 司机 | 称重（`DEVICE` 直传 / `MANUAL` 手动补录须填原因 / `OFFLINE_MANUAL` 设备离线补录须秤面照片+原因，联单进入待复核） |
 | POST | `/api/weighings/devices/{code}/heartbeat` | 设备 | 称重设备心跳 |
+| GET | `/api/supplement-reviews?status=` | 回收公司/监管 | 离线补录复核队列 |
+| GET | `/api/supplement-reviews/{id}` | 回收公司/监管 | 复核工作台：秤面照片、油桶数量、历史重量、司机补录频次与信用 |
+| POST | `/api/supplement-reviews/{id}/approve` `/reject` | 回收公司/监管 | 复核通过（打人工补录标记、放行结算）/ 驳回（扣司机信用、阻断闭环） |
+| GET | `/api/drivers` | 回收公司/监管 | 司机信用分、窗口期离线补录频次、限补录状态 |
+| POST | `/api/drivers/{id}/restrict` `/unrestrict` | 回收公司 | 限制/解除司机手动补录（频繁离线管控） |
 | POST | `/api/dispatches/{id}/load-complete` | 司机 | 装车完成起运（联单转 IN_TRANSIT） |
 | POST | `/api/tracks/{dispatchId}` | 司机 | 批量上传运输轨迹点 |
 | POST | `/api/receipts` | 处置厂 | 收料：二次称重 + 质检 + 接收/拒收，自动触发合规比对 |
@@ -101,6 +131,7 @@ bash scripts/smoke.sh
 | POST | `/api/disputes` `/api/disputes/{id}/resolve` | 商户/回收公司 | 重量质疑与协商解决（结算冻结/调整） |
 | GET/POST | `/api/exceptions` `/api/exceptions/{id}/resolve` | 回收公司/监管 | 异常工单查询与处理（阻断类处理后联单自动重估） |
 | POST | `/api/inspections` | 监管 | 抽查登记（不合格自动入风险名单） |
+| GET | `/api/inspections/priority-targets` | 监管 | 优先抽查目标（带人工补录标记的联单，未抽查的排前） |
 | POST/GET | `/api/risks/scan` `/api/risks` | 监管 | 风险扫描与风险名单 |
 | GET | `/api/reports/regulator/trend` | 监管 | 废油流向合规处置的长期趋势 |
 | GET | `/api/reports/vehicle-efficiency` | 回收公司 | 车辆效率（趟次/运量/准点） |
@@ -116,6 +147,8 @@ bash scripts/smoke.sh
 | 油桶混入厨余 | 收料质检 `CONTAMINATED`，联单标记 `qualityIssue` 并登记工单（不阻断闭环） |
 | 称重设备离线 | 心跳超时判定离线，离线数据在联单上计数留痕，登记 `DEVICE_OFFLINE` |
 | 司机手动补录 | 必须填写原因，联单记录补录条数，登记 `MANUAL_ENTRY` |
+| 蓝牙秤无法连接（离线补录） | `OFFLINE_MANUAL` 补录须秤面照片+原因，联单待复核（`PENDING_REVIEW`），复核通过前不结算；通过打人工补录标记，驳回扣司机信用并联单转异常（`OFFLINE_SUPPLEMENT_REJECTED` 阻断工单） |
+| 同一司机频繁设备离线 | 30 天内离线补录达 3 次登记 `DRIVER_OFFLINE_FREQUENT` 工单，回收公司检查设备或限制该司机手动补录（被限司机补录请求 409） |
 | 运输轨迹缺失 | 定时扫描 + 收料时合规校验，阻断闭环直至工单处理 |
 | 处置厂拒收 | 联单 `REJECTED`，登记 `PLANT_REJECT` 由回收公司处置 |
 | 商户质疑重量 | 联单 `DISPUTED`、结算冻结，协商后按调整重量重新结算并闭环 |
@@ -127,8 +160,9 @@ bash scripts/smoke.sh
 ```
 src/main/java/com/wasteoil/
 ├── appointment/   预约提交与取消
-├── dispatch/      派单规划（容量/限行/时间窗）与运输执行
-├── weighing/      扫码核验、设备/手动称重、设备心跳
+├── dispatch/      派单规划（容量/限行/时间窗）、运输执行与司机信用管控
+├── weighing/      扫码核验、设备/手动/离线补录称重、设备心跳
+├── supplement/    离线补录复核（复核队列/工作台/通过打标/驳回扣信用）
 ├── track/         运输轨迹与缺失扫描
 ├── plant/         处置厂二次称重收料
 ├── compliance/    合规闭环比对引擎

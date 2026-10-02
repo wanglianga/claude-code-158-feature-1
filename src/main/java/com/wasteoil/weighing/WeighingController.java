@@ -21,12 +21,13 @@ public class WeighingController {
         this.weighingService = weighingService;
     }
 
-    /** 提交称重（设备直传 DEVICE / 司机手动补录 MANUAL） */
+    /** 提交称重（设备直传 DEVICE / 手动补录 MANUAL / 设备离线补录 OFFLINE_MANUAL） */
     @PostMapping
     public ApiResult<WeighingRecord> submit(@Valid @RequestBody WeighingRequest req) {
         AuthContext.require(ActorRole.DRIVER, ActorRole.RECYCLER);
         return ApiResult.ok(weighingService.submit(req.dispatchId(), req.barrelCode(), req.weightKg(),
-                req.deviceCode(), req.source(), req.photoUrl(), req.handoverName(), req.note()));
+                req.deviceCode(), req.source(), req.photoUrl(), req.scalePhotoUrl(),
+                req.handoverName(), req.note()));
     }
 
     /** 称重设备心跳 */
@@ -43,6 +44,7 @@ public class WeighingController {
             String deviceCode,
             @NotBlank(message = "称重来源不能为空") String source,
             String photoUrl,
+            String scalePhotoUrl,
             String handoverName,
             String note) {
     }

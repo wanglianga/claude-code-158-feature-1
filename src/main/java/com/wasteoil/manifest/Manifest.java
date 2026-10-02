@@ -70,6 +70,14 @@ public class Manifest {
     @Column(name = "offline_weigh_count", nullable = false)
     private Integer offlineWeighCount = 0;
 
+    /** 离线补录复核状态：NONE / PENDING / APPROVED / REJECTED */
+    @Column(name = "supplement_review_status", nullable = false)
+    private String supplementReviewStatus = "NONE";
+
+    /** 人工补录标记：复核通过后打上，监管抽查可优先查看 */
+    @Column(name = "manual_supplement_flag", nullable = false)
+    private Boolean manualSupplementFlag = false;
+
     /** 运输轨迹是否缺失 */
     @Column(name = "track_missing", nullable = false)
     private Boolean trackMissing = false;

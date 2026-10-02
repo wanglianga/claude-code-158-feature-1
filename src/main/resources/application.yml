@@ -52,3 +52,9 @@ wasteoil:
   risk-window-days: 90
   # 产量/预期比值低于该值进入风险名单
   risk-yield-ratio: 0.3
+  # 司机频繁设备离线判定窗口（天）
+  driver-offline-window-days: 30
+  # 窗口内离线补录达到该次数即判定频繁离线，要求回收公司检查设备或限制补录
+  driver-offline-frequent-threshold: 3
+  # 离线补录复核驳回时司机信用扣分
+  driver-credit-deduct-on-reject: 10

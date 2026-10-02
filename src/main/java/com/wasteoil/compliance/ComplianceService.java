@@ -116,6 +116,14 @@ public class ComplianceService {
                     "处置厂质检发现混入厨余: " + receipt.getRejectReason());
         }
 
+        // 5. 离线补录复核门禁：复核驳回的联单阻断闭环（工单在驳回时已登记，此处幂等）
+        if ("REJECTED".equals(manifest.getSupplementReviewStatus())) {
+            hasBlocking = true;
+            issues.add("离线补录复核未通过");
+            exceptionService.raise(ExceptionType.OFFLINE_SUPPLEMENT_REJECTED, "MANIFEST", manifest.getId(),
+                    "离线补录复核未通过，需回收公司处置后方可闭环");
+        }
+
         manifest.setArrivalWeightKg(arrival);
         manifest.setBarrelCountArrival(receipt.getBarrelCount());
 
@@ -123,6 +131,13 @@ public class ComplianceService {
             manifest.setComplianceResult("EXCEPTION");
             manifest.setExceptionNote(String.join("; ", issues));
             manifest.setStatus(ManifestStatus.EXCEPTION);
+        } else if ("PENDING".equals(manifest.getSupplementReviewStatus())) {
+            // 合规比对通过，但离线补录待人工复核：暂缓结算，复核通过后才允许进入结算
+            if (!issues.isEmpty()) {
+                manifest.setExceptionNote(String.join("; ", issues));
+            }
+            manifest.setComplianceResult("PASS");
+            manifest.setStatus(ManifestStatus.PENDING_REVIEW);
         } else {
             // 非阻断性问题（如混入厨余）记录但不妨碍闭环
             if (!issues.isEmpty()) {
@@ -152,6 +167,7 @@ public class ComplianceService {
 
     /**
      * 阻断性异常处理完毕后重新评估：无未处理阻断异常则闭环。
+     * 离线补录仍待复核的联单转入待复核，复核通过后才允许结算。
      */
     @Transactional
     public Manifest reevaluate(Long manifestId) {
@@ -163,8 +179,31 @@ public class ComplianceService {
         if (exceptionService.hasBlockingOpen("MANIFEST", manifestId)) {
             return manifest;
         }
+        if ("PENDING".equals(manifest.getSupplementReviewStatus())) {
+            manifest.setStatus(ManifestStatus.PENDING_REVIEW);
+            manifest.setComplianceResult("PASS");
+            manifest.setUpdatedAt(java.time.Instant.now());
+            return manifestRepository.save(manifest);
+        }
         manifest.setStatus(ManifestStatus.VERIFIED);
         manifest.setComplianceResult("PASS");
+        manifest.setUpdatedAt(java.time.Instant.now());
+        Manifest saved = manifestRepository.save(manifest);
+        closeLoop(saved);
+        return saved;
+    }
+
+    /**
+     * 补录复核通过后恢复闭环：待复核联单生成结算单并闭环。
+     */
+    @Transactional
+    public Manifest closeAfterReviewApproval(Long manifestId) {
+        Manifest manifest = manifestRepository.findById(manifestId)
+                .orElseThrow(() -> com.wasteoil.common.BizException.notFound("电子联单"));
+        if (manifest.getStatus() != ManifestStatus.PENDING_REVIEW) {
+            return manifest;
+        }
+        manifest.setStatus(ManifestStatus.VERIFIED);
         manifest.setUpdatedAt(java.time.Instant.now());
         Manifest saved = manifestRepository.save(manifest);
         closeLoop(saved);

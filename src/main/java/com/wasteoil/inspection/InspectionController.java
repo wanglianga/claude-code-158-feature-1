@@ -35,6 +35,13 @@ public class InspectionController {
         return ApiResult.ok(inspectionService.listByManifest(manifestId));
     }
 
+    /** 优先抽查目标：带人工补录标记的联单（未抽查的优先） */
+    @GetMapping("/priority-targets")
+    public ApiResult<List<InspectionService.PriorityTarget>> priorityTargets() {
+        AuthContext.require(ActorRole.REGULATOR);
+        return ApiResult.ok(inspectionService.priorityTargets());
+    }
+
     public record InspectionRequest(
             @NotNull(message = "联单不能为空") Long manifestId,
             String inspector,
